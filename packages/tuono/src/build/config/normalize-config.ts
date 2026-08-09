@@ -80,5 +80,22 @@ export const normalizeConfig = (config: TuonoConfig): InternalTuonoConfig => {
       optimizeDeps: config.vite?.optimizeDeps,
       plugins: config.vite?.plugins ?? [],
     },
+    logging: {
+      format: config.logging?.format ?? 'pretty',
+      routeTree: config.logging?.routeTree ?? false,
+      browser: {
+        enabled: config.logging?.browser?.enabled ?? true,
+        level: config.logging?.browser?.level ?? 'info',
+      },
+    },
+    dev: {
+      criticalCss: config.dev?.criticalCss ?? true,
+    },
+    ssr: {
+      // `null` = auto: the Rust runtime uses the machine's available
+      // parallelism (resolving it here would bake in the build machine's cores).
+      renderThreads: config.ssr?.renderThreads ?? null,
+    },
+    output: config.output ?? 'server',
   }
 }

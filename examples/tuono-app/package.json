@@ -2,10 +2,13 @@
   "name": "tuono-app",
   "description": "Basic tuono application",
   "version": "0.0.1",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "tuono": "link:../../packages/tuono"
+    "tuono": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "^19.0.2",

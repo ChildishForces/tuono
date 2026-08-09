@@ -1,6 +1,6 @@
 [package]
 name = "tuono_lib_macros"
-version = "0.19.7"
+version = "0.20.0"
 edition = "2024"
 description = "Superfast React fullstack framework"
 homepage = "https://tuono.dev"
@@ -20,3 +20,4 @@ proc-macro = true
 [dependencies]
 syn = { version = "2.0.0", features = ["full"] }
 quote = "1.0"
+proc-macro2 = "1.0"

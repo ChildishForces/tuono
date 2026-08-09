@@ -1,11 +1,11 @@
-use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
-use regex::Regex;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+
+use once_cell::sync::{Lazy, OnceCell};
+use regex::Regex;
+use serde::Deserialize;
 
 const VITE_MANIFEST_PATH: &str = "./out/client/.vite/manifest.json";
 
@@ -44,10 +44,20 @@ pub struct RouteBundle {
     pub js_files: Vec<String>,
 }
 
+/// Fallback returned by [`Manifest::get_bundle_from_pathname`] when no bundle
+/// matches (in practice unreachable — `client-main` always exists). Static so
+/// the lookup can hand back a borrow instead of cloning a bundle per request.
+static EMPTY_BUNDLE: Lazy<RouteBundle> = Lazy::new(RouteBundle::default);
+
 #[derive(Debug)]
 pub struct Manifest {
     /// The mapping between the route and the bundle
     bundles: HashMap<String, RouteBundle>,
+    /// Dynamic route keys with their pre-split (non-empty) path segments,
+    /// computed once at load so the per-request matcher doesn't re-filter the
+    /// bundle map or re-split route paths. Sorted by key so matching is
+    /// deterministic (a `HashMap` iteration order is not).
+    dynamic_routes: Vec<(String, Vec<String>)>,
 }
 
 fn clean_route_path(path: String) -> String {
@@ -58,11 +68,22 @@ fn clean_route_path(path: String) -> String {
         .replace(".md", "")
         .replace(".jsx", "");
 
-    if path == "/index" {
+    // A route lives in `<dir>/page`; the URL is its containing directory.
+    if path == "/page" {
         return "/".to_string();
     }
 
-    path.replace("/index", "")
+    match path.strip_suffix("/page") {
+        Some(directory) => directory.to_string(),
+        None => path,
+    }
+}
+
+/// Whether a cleaned route path refers to a `layout` file — the root `/layout`
+/// or a nested `<dir>/layout`. Layout bundles are merged into the routes they
+/// wrap rather than served as routes themselves.
+fn is_layout_route(route: &str) -> bool {
+    route == "/layout" || route.ends_with("/layout")
 }
 
 impl From<ViteManifest> for Manifest {
@@ -75,7 +96,9 @@ impl From<ViteManifest> for Manifest {
             .clone();
 
         for (key, bundle) in &manifest {
-            if key.contains("__layout") {
+            let route = clean_route_path(key.clone());
+
+            if is_layout_route(&route) {
                 continue;
             }
 
@@ -89,8 +112,6 @@ impl From<ViteManifest> for Manifest {
                 );
                 continue;
             }
-
-            let route = clean_route_path(key.clone());
 
             // Skip components/utils files
             if !route.starts_with("/") {
@@ -122,11 +143,11 @@ impl From<ViteManifest> for Manifest {
             bundles.insert(route, route_bundle);
         }
 
-        // Add __layout imports
+        // Add `layout` imports to every route they wrap.
         for (key, layout_bundle) in &manifest {
             let route = clean_route_path(key.clone());
-            if route.contains("__layout") {
-                let path_included_in_layout = route.replace("__layout", "");
+            if is_layout_route(&route) {
+                let path_included_in_layout = route.replace("/layout", "");
 
                 let mut layout_css_files: Vec<String> = Vec::new();
                 let mut layout_js_files: Vec<String> = Vec::new();
@@ -153,7 +174,24 @@ impl From<ViteManifest> for Manifest {
             }
         }
 
-        Manifest { bundles }
+        let mut dynamic_routes: Vec<(String, Vec<String>)> = bundles
+            .keys()
+            .filter(|path| has_dynamic_path(path))
+            .map(|path| {
+                let segments = path
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                (path.clone(), segments)
+            })
+            .collect();
+        dynamic_routes.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        Manifest {
+            bundles,
+            dynamic_routes,
+        }
     }
 }
 
@@ -165,43 +203,32 @@ impl Manifest {
     /// this file (packages/tuono/src/router/components/Matches.ts).
     ///
     /// Optimizations should occour on both.
-    pub fn get_bundle_from_pathname(&self, pathname: &str) -> RouteBundle {
+    pub fn get_bundle_from_pathname(&self, pathname: &str) -> &RouteBundle {
         // Exact match
         if let Some(bundle) = self.bundles.get(pathname) {
-            return bundle.clone();
+            return bundle;
         }
 
-        let dynamic_routes = self
-            .bundles
-            .keys()
-            .filter(|path| has_dynamic_path(path))
-            .collect::<Vec<&String>>();
-
-        if !dynamic_routes.is_empty() {
+        if !self.dynamic_routes.is_empty() {
             let path_segments = pathname
                 .split('/')
                 .filter(|path| !path.is_empty())
                 .collect::<Vec<&str>>();
 
-            '_dynamic_routes_loop: for dyn_route in dynamic_routes.iter() {
-                let dyn_route_segments = dyn_route
-                    .split('/')
-                    .filter(|path| !path.is_empty())
-                    .collect::<Vec<&str>>();
-
+            '_dynamic_routes_loop: for (_, dyn_route_segments) in &self.dynamic_routes {
                 let mut route_segments_collector: Vec<&str> = Vec::new();
 
                 for i in 0..dyn_route_segments.len() {
                     // Catch all dynamic route
                     if dyn_route_segments[i].starts_with("[...") {
-                        route_segments_collector.push(dyn_route_segments[i]);
+                        route_segments_collector.push(dyn_route_segments[i].as_str());
 
                         let manifest_key = route_segments_collector.join("/");
 
                         let route_data = self.bundles.get(&format!("/{manifest_key}"));
 
                         if let Some(data) = route_data {
-                            return data.clone();
+                            return data;
                         }
                         break '_dynamic_routes_loop;
                     }
@@ -209,9 +236,9 @@ impl Manifest {
                         break;
                     }
                     if dyn_route_segments[i] == path_segments[i]
-                        || has_dynamic_path(dyn_route_segments[i])
+                        || has_dynamic_path(&dyn_route_segments[i])
                     {
-                        route_segments_collector.push(dyn_route_segments[i])
+                        route_segments_collector.push(dyn_route_segments[i].as_str())
                     } else {
                         break;
                     }
@@ -222,7 +249,7 @@ impl Manifest {
 
                     let route_data = self.bundles.get(&format!("/{manifest_key}"));
                     if let Some(data) = route_data {
-                        return data.clone();
+                        return data;
                     }
                     break;
                 }
@@ -231,11 +258,11 @@ impl Manifest {
 
         // No dynamic routes, return the client main bundle
         if let Some(bundle) = self.bundles.get("client-main") {
-            return bundle.clone();
+            return bundle;
         }
 
         // This should never happen because client-main always exists
-        RouteBundle::default()
+        &EMPTY_BUNDLE
     }
 }
 
@@ -261,10 +288,10 @@ mod tests {
     // It includes dynamic routes, static routes, catch all routes, nested
     // __layout and shared components.
     const MANIFEST_EXAMPLE: &str = r#"{
-      "../src/routes/about.tsx": {
+      "../src/routes/about/page.tsx": {
         "file": "assets/about-C3UqHfGb.js",
         "name": "about",
-        "src": "../src/routes/about.tsx",
+        "src": "../src/routes/about/page.tsx",
         "isDynamicEntry": true,
         "imports": [
           "client-main.tsx",
@@ -284,10 +311,10 @@ mod tests {
           "assets/FileWithCssOnly.css"
         ]
       },
-      "../src/routes/catch_all/[...slug].tsx": {
+      "../src/routes/catch_all/[...slug]/page.tsx": {
         "file": "assets/_...slug_-CpJyPnPj.js",
         "name": "_...slug_",
-        "src": "../src/routes/catch_all/[...slug].tsx",
+        "src": "../src/routes/catch_all/[...slug]/page.tsx",
         "isDynamicEntry": true,
         "imports": [
           "client-main.tsx"
@@ -296,10 +323,10 @@ mod tests {
           "assets/_..-CipbPoTl.css"
         ]
       },
-      "../src/routes/index.tsx": {
+      "../src/routes/page.tsx": {
         "file": "assets/index-B3tnHOzi.js",
         "name": "index",
-        "src": "../src/routes/index.tsx",
+        "src": "../src/routes/page.tsx",
         "isDynamicEntry": true,
         "imports": [
           "client-main.tsx"
@@ -308,10 +335,10 @@ mod tests {
           "assets/index-CynfArjF.css"
         ]
       },
-      "../src/routes/pokemons/[pokemon]/[type].tsx": {
+      "../src/routes/pokemons/[pokemon]/[type]/page.tsx": {
         "file": "assets/_type_-B-sJOcVJ.js",
         "name": "_type_",
-        "src": "../src/routes/pokemons/[pokemon]/[type].tsx",
+        "src": "../src/routes/pokemons/[pokemon]/[type]/page.tsx",
         "isDynamicEntry": true,
         "imports": [
           "client-main.tsx",
@@ -321,10 +348,10 @@ mod tests {
           "assets/_type_-B8vgxybx.css"
         ]
       },
-      "../src/routes/pokemons/[pokemon]/index.tsx": {
+      "../src/routes/pokemons/[pokemon]/page.tsx": {
         "file": "assets/index-ByRBj7WK.js",
         "name": "index",
-        "src": "../src/routes/pokemons/[pokemon]/index.tsx",
+        "src": "../src/routes/pokemons/[pokemon]/page.tsx",
         "isDynamicEntry": true,
         "imports": [
           "client-main.tsx",
@@ -334,10 +361,10 @@ mod tests {
           "assets/index-CM86zKWq.css"
         ]
       },
-      "../src/routes/pokemons/__layout.tsx": {
+      "../src/routes/pokemons/layout.tsx": {
         "file": "assets/__layout-2v3JiSeL.js",
         "name": "__layout",
-        "src": "../src/routes/pokemons/__layout.tsx",
+        "src": "../src/routes/pokemons/layout.tsx",
         "isDynamicEntry": true,
         "imports": [
           "client-main.tsx"
@@ -366,12 +393,12 @@ mod tests {
         "src": "client-main.tsx",
         "isEntry": true,
         "dynamicImports": [
-          "../src/routes/pokemons/__layout.tsx",
-          "../src/routes/about.tsx",
-          "../src/routes/index.tsx",
-          "../src/routes/catch_all/[...slug].tsx",
-          "../src/routes/pokemons/[pokemon]/[type].tsx",
-          "../src/routes/pokemons/[pokemon]/index.tsx"
+          "../src/routes/pokemons/layout.tsx",
+          "../src/routes/about/page.tsx",
+          "../src/routes/page.tsx",
+          "../src/routes/catch_all/[...slug]/page.tsx",
+          "../src/routes/pokemons/[pokemon]/[type]/page.tsx",
+          "../src/routes/pokemons/[pokemon]/page.tsx"
         ],
         "css": [
           "assets/client-main-BS7N-NIa.css"
@@ -381,21 +408,21 @@ mod tests {
 
     #[test]
     fn it_correctly_cleans_the_route_path() {
-        let cleaned_path = clean_route_path("../src/routes/index.tsx".to_string());
+        let cleaned_path = clean_route_path("../src/routes/page.tsx".to_string());
         assert_eq!(cleaned_path, "/");
 
         let cleaned_path =
-            clean_route_path("../src/routes/pokemons/[pokemon]/index.tsx".to_string());
+            clean_route_path("../src/routes/pokemons/[pokemon]/page.tsx".to_string());
         assert_eq!(cleaned_path, "/pokemons/[pokemon]");
 
-        let cleaned_path = clean_route_path("../src/routes/pokemons/__layout.tsx".to_string());
-        assert_eq!(cleaned_path, "/pokemons/__layout");
+        let cleaned_path = clean_route_path("../src/routes/pokemons/layout.tsx".to_string());
+        assert_eq!(cleaned_path, "/pokemons/layout");
 
         let cleaned_path =
-            clean_route_path("../src/routes/pokemons/[pokemon]/[type].mdx".to_string());
+            clean_route_path("../src/routes/pokemons/[pokemon]/[type]/page.mdx".to_string());
         assert_eq!(cleaned_path, "/pokemons/[pokemon]/[type]");
 
-        let cleaned_path = clean_route_path("../src/routes/about.md".to_string());
+        let cleaned_path = clean_route_path("../src/routes/about/page.md".to_string());
         assert_eq!(cleaned_path, "/about");
     }
 

@@ -1,24 +1,47 @@
+use std::collections::HashMap;
+
+use erased_serde::Serialize;
+use serde::Serialize as SerdeSerialize;
+use serde_json::value::RawValue;
+use tuono_internal::config::ServerConfig;
+
 use crate::config::GLOBAL_CONFIG;
 use crate::manifest::MANIFEST;
 use crate::mode::{GLOBAL_MODE, Mode};
-use erased_serde::Serialize;
-use serde::Serialize as SerdeSerialize;
-use tuono_internal::config::ServerConfig;
-
 use crate::request::{Location, Request};
+use crate::server_error::ServerError;
+
+/// Empty stand-in for the `data` field when rendering an error payload, which
+/// carries no route data. `'static` so it coerces to the payload's lifetime.
+const EMPTY_DATA: () = ();
 
 #[derive(SerdeSerialize)]
 /// This is the payload sent to the client for hydration
 pub struct Payload<'a> {
     location: Location,
     data: &'a dyn Serialize,
+    /// Server data for the `layout.rs` handlers wrapping this page, keyed by the
+    /// layout's route file path (its `dataKey`). Absent when no wrapping layout
+    /// has a data handler, so a plain page payload is unchanged.
+    #[serde(
+        rename(serialize = "layoutData"),
+        skip_serializing_if = "Option::is_none"
+    )]
+    layout_data: Option<&'a HashMap<String, Box<RawValue>>>,
     mode: Mode,
     #[serde(rename(serialize = "jsBundles"))]
-    js_bundles: Option<Vec<String>>,
+    js_bundles: Option<&'a Vec<String>>,
     #[serde(rename(serialize = "cssBundles"))]
-    css_bundles: Option<Vec<String>>,
+    css_bundles: Option<&'a Vec<String>>,
     #[serde(rename(serialize = "devServerConfig"))]
     dev_server_config: Option<&'a ServerConfig>,
+    /// Present only when a handler panicked (dev mode). The client seeds the
+    /// route's data resource as rejected so the error overlay renders.
+    #[serde(
+        rename(serialize = "serverError"),
+        skip_serializing_if = "Option::is_none"
+    )]
+    server_error: Option<ServerError>,
 }
 
 impl<'a> Payload<'a> {
@@ -38,11 +61,32 @@ impl<'a> Payload<'a> {
         Payload {
             location: req.location(),
             data,
+            layout_data: None,
             mode,
             js_bundles: None,
             css_bundles: None,
             dev_server_config,
+            server_error: None,
         }
+    }
+
+    /// Build a payload that also carries the wrapping layouts' server data.
+    pub fn new_with_layout(
+        req: &'a Request,
+        data: &'a dyn Serialize,
+        layout_data: Option<&'a HashMap<String, Box<RawValue>>>,
+    ) -> Payload<'a> {
+        let mut payload = Payload::new(req, data);
+        payload.layout_data = layout_data;
+        payload
+    }
+
+    /// Build a payload that carries a handler error instead of route data. Used
+    /// by the SSR error path so the client renders the error overlay.
+    pub fn new_with_error(req: &'a Request, error: ServerError) -> Payload<'a> {
+        let mut payload = Payload::new(req, &EMPTY_DATA);
+        payload.server_error = Some(error);
+        payload
     }
 
     pub fn client_payload(&mut self) -> Result<String, serde_json::Error> {
@@ -55,23 +99,24 @@ impl<'a> Payload<'a> {
     fn add_bundle_sources(&mut self) {
         let manifest = MANIFEST.get().expect("Manifest not loaded");
         let bundles = manifest.get_bundle_from_pathname(self.location.pathname());
-        self.js_bundles = Some(bundles.js_files);
-        self.css_bundles = Some(bundles.css_files);
+        self.js_bundles = Some(&bundles.js_files);
+        self.css_bundles = Some(&bundles.css_files);
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::*;
-    use crate::manifest::ViteManifest;
     use axum::http::Uri;
 
+    use super::*;
+    use crate::manifest::ViteManifest;
+
     const MANIFEST_EXAMPLE: &str = r#"{
-        "../src/routes/index.tsx": {
+        "../src/routes/page.tsx": {
             "file": "assets/index-D-yFyCZo.js",
             "name": "index",
-            "src": "../src/routes/index.tsx",
+            "src": "../src/routes/page.tsx",
             "isDynamicEntry": true,
             "imports": [
                 "client-main.tsx"
@@ -80,10 +125,10 @@ mod tests {
                 "assets/index-CynfArjF.css"
             ]
         },
-        "../src/routes/pokemons/[pokemon].tsx": {
+        "../src/routes/pokemons/[pokemon]/page.tsx": {
             "file": "assets/_pokemon_-DlFInatQ.js",
             "name": "_pokemon_",
-            "src": "../src/routes/pokemons/[pokemon].tsx",
+            "src": "../src/routes/pokemons/[pokemon]/page.tsx",
             "isDynamicEntry": true,
             "imports": [
                 "client-main.tsx"
@@ -92,10 +137,10 @@ mod tests {
                 "assets/_pokemon_-BcJZaQaO.css"
             ]
         },
-        "../src/routes/pokemons/__layout.tsx": {
+        "../src/routes/pokemons/layout.tsx": {
             "file": "assets/__layout-BFnT3M7X.js",
             "name": "__layout",
-            "src": "../src/routes/pokemons/__layout.tsx",
+            "src": "../src/routes/pokemons/layout.tsx",
             "isDynamicEntry": true,
             "imports": [
                 "client-main.tsx"
@@ -110,9 +155,9 @@ mod tests {
             "src": "client-main.tsx",
             "isEntry": true,
             "dynamicImports": [
-                "../src/routes/pokemons/__layout.tsx",
-                "../src/routes/index.tsx",
-                "../src/routes/pokemons/[pokemon].tsx"
+                "../src/routes/pokemons/layout.tsx",
+                "../src/routes/page.tsx",
+                "../src/routes/pokemons/[pokemon]/page.tsx"
             ],  
             "css": [
                 "assets/client-main-BS7N-NIa.css"
@@ -135,10 +180,12 @@ mod tests {
         Payload {
             location,
             data: &None::<Option<()>>,
+            layout_data: None,
             mode,
             js_bundles: None,
             css_bundles: None,
             dev_server_config: None,
+            server_error: None,
         }
     }
 
@@ -149,14 +196,14 @@ mod tests {
         let _ = payload.client_payload();
         assert_eq!(
             payload.js_bundles,
-            Some(vec![
+            Some(&vec![
                 "assets/index-D-yFyCZo.js".to_string(),
                 "assets/client-main-B9g1NVV7.js".to_string()
             ])
         );
         assert_eq!(
             payload.css_bundles,
-            Some(vec![
+            Some(&vec![
                 "assets/index-CynfArjF.css".to_string(),
                 "assets/client-main-BS7N-NIa.css".to_string()
             ])

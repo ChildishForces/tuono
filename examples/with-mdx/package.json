@@ -2,11 +2,14 @@
   "name": "with-mdx",
   "description": "Tuono example combined with mdx",
   "version": "0.0.1",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@mdx-js/react": "^3.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "tuono": "link:../../packages/tuono"
+    "tuono": "workspace:*"
   },
   "devDependencies": {
     "@mdx-js/rollup": "^3.1.0",

@@ -1,17 +1,17 @@
-use crate::app::{IGNORE_EXTENSIONS, IGNORE_FILES, ROUTES_FOLDER_PATH};
-use crate::route::Route;
-use quote::quote;
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Debug;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::{fs, io};
+
+use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::token::Comma;
 use syn::{Attribute, Expr, FnArg, Ident, Item, ItemFn, parse_quote};
 
-pub const MIDDLEWARE_FILENAME: &str = "middlewares";
+use crate::app::{MIDDLEWARE_FILENAME, ROUTES_FOLDER_PATH, is_collectible_route};
+use crate::route::Route;
 
 #[derive(Clone, Debug, Default)]
 pub struct RouteDirectoryInfo {
@@ -107,17 +107,7 @@ impl RouteDirectoryInfo {
     }
 
     pub fn should_collect_route(entry: &Path) -> bool {
-        let file_extension = entry.extension().expect("Failed to read file extension");
-        let file_name = entry.file_stem().expect("Failed to read file name");
-
-        if IGNORE_EXTENSIONS.iter().any(|val| val == &file_extension) {
-            return false;
-        }
-
-        if IGNORE_FILES.iter().any(|val| val == &file_name) {
-            return false;
-        }
-        true
+        is_collectible_route(entry, &RouteDirectoryInfo::get_base_path())
     }
 
     fn collect_route(entry: PathBuf, routes: HashMap<String, Route>) -> HashMap<String, Route> {
@@ -202,18 +192,16 @@ impl MiddlewareData {
         Some(MiddlewareData { middlewares })
     }
 
-    // Given an array of syn::Attribute, returns true if the segments are "tuono_lib" and "middleware"
+    // Given an array of syn::Attribute, returns true if any is the `middleware`
+    // attribute — either imported (`#[middleware]`) or fully-qualified
+    // (`#[tuono_lib::middleware]`).
     pub fn has_middleware_attr(attrs: &[Attribute]) -> bool {
-        attrs.iter().any(|attr| {
-            let path = attr.path();
-
-            let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-
-            segments == ["tuono_lib", "middleware"]
-        })
+        attrs
+            .iter()
+            .any(|attr| crate::macro_attr::is_tuono_attr(attr.path(), "middleware"))
     }
 
-    // Reads a middlewares.rs file and returns a Vector of Strings representing functions that were decorated with the tuono_lib::middleware macro
+    // Reads a middleware.rs file and returns a Vector of Strings representing functions that were decorated with the tuono_lib::middleware macro
     pub fn read_middleware_methods_from_file(path: &str) -> Arc<Mutex<Vec<DebugItemFn>>> {
         let file = fs_extra::file::read_to_string(path).expect("Failed to read API file");
         let syntax = syn::parse_file(&file).expect("Unable to parse file");
@@ -232,10 +220,12 @@ impl MiddlewareData {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::File;
     use std::io::Write;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_has_middlewares() {
@@ -260,7 +250,7 @@ mod tests {
         // Assuming base path is current dir, but this might vary
         // For test, we can check the format
         let import = dir_info.get_middleware_module_import();
-        assert!(import.ends_with("_middlewares"));
+        assert!(import.ends_with("_middleware"));
     }
 
     #[test]
@@ -272,23 +262,34 @@ mod tests {
     #[test]
     fn test_should_collect_route() {
         let temp_dir = TempDir::new().unwrap();
-        let rs_file = temp_dir.path().join("test.rs");
-        File::create(&rs_file).unwrap();
-        assert!(RouteDirectoryInfo::should_collect_route(&rs_file));
 
-        let tsx_file = temp_dir.path().join("test.tsx");
-        File::create(&tsx_file).unwrap();
-        assert!(RouteDirectoryInfo::should_collect_route(&tsx_file));
+        let page_rs = temp_dir.path().join("page.rs");
+        File::create(&page_rs).unwrap();
+        assert!(RouteDirectoryInfo::should_collect_route(&page_rs));
 
-        let md_file = temp_dir.path().join("test.md");
-        File::create(&md_file).unwrap();
-        assert!(RouteDirectoryInfo::should_collect_route(&md_file));
+        let page_tsx = temp_dir.path().join("page.tsx");
+        File::create(&page_tsx).unwrap();
+        assert!(RouteDirectoryInfo::should_collect_route(&page_tsx));
+
+        // `layout.rs` is a data handler (collected); `layout.tsx` is not.
+        let layout_rs = temp_dir.path().join("layout.rs");
+        File::create(&layout_rs).unwrap();
+        assert!(RouteDirectoryInfo::should_collect_route(&layout_rs));
+
+        let layout_tsx = temp_dir.path().join("layout.tsx");
+        File::create(&layout_tsx).unwrap();
+        assert!(!RouteDirectoryInfo::should_collect_route(&layout_tsx));
+
+        // A stray colocated file is not a route.
+        let stray = temp_dir.path().join("helper.tsx");
+        File::create(&stray).unwrap();
+        assert!(!RouteDirectoryInfo::should_collect_route(&stray));
     }
 
     #[test]
     fn test_collect_route() {
         let temp_dir = TempDir::new().unwrap();
-        let rs_file = temp_dir.path().join("index.rs");
+        let rs_file = temp_dir.path().join("page.rs");
         File::create(&rs_file).unwrap();
 
         let routes = HashMap::new();
@@ -303,7 +304,7 @@ mod tests {
         std::fs::create_dir(&sub_dir).unwrap();
         let file = temp_dir.path().join("test.rs");
         File::create(&file).unwrap();
-        let middlewares_file = temp_dir.path().join("middlewares.rs");
+        let middlewares_file = temp_dir.path().join("middleware.rs");
         let mut file = File::create(&middlewares_file).unwrap();
         writeln!(file, "#[tuono_lib::middleware]\nfn test_middleware() {{}}").unwrap();
 
@@ -316,7 +317,7 @@ mod tests {
     #[test]
     fn test_middleware_data_new() {
         let temp_dir = TempDir::new().unwrap();
-        let middlewares_file = temp_dir.path().join("middlewares.rs");
+        let middlewares_file = temp_dir.path().join("middleware.rs");
         let mut file = File::create(&middlewares_file).unwrap();
         writeln!(file, "#[tuono_lib::middleware]\nfn test_middleware() {{}}").unwrap();
 
@@ -333,8 +334,13 @@ mod tests {
 
     #[test]
     fn test_has_middleware_attr() {
+        // Fully-qualified form.
         let attr: Attribute = syn::parse_quote!(#[tuono_lib::middleware]);
         assert!(MiddlewareData::has_middleware_attr(&[attr]));
+
+        // Imported form (`use tuono_lib::middleware;` then `#[middleware]`).
+        let imported: Attribute = syn::parse_quote!(#[middleware]);
+        assert!(MiddlewareData::has_middleware_attr(&[imported]));
 
         let attr2: Attribute = syn::parse_quote!(#[other_attr]);
         assert!(!MiddlewareData::has_middleware_attr(&[attr2]));
@@ -343,7 +349,7 @@ mod tests {
     #[test]
     fn test_read_middleware_methods_from_file() {
         let temp_dir = TempDir::new().unwrap();
-        let middlewares_file = temp_dir.path().join("middlewares.rs");
+        let middlewares_file = temp_dir.path().join("middleware.rs");
         let mut file = File::create(&middlewares_file).unwrap();
         writeln!(
             file,

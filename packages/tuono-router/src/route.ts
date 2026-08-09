@@ -1,4 +1,9 @@
-import type { RouteComponent } from './types'
+import type {
+  RouteComponent,
+  LoadingComponent,
+  ErrorComponent,
+  NotFoundComponent,
+} from './types'
 import { trimPathLeft, joinPaths } from './utils'
 
 interface RouteOptions {
@@ -7,8 +12,32 @@ interface RouteOptions {
   getParentRoute?: () => Route
   path?: string
   filePath?: string
+  /**
+   * The route's source file path (e.g. `/about/page`, `/blog/layout`), matching
+   * the Rust route key. Used to seed/read this route's server data — for pages
+   * and, crucially, for `layout.rs` data (keyed by `dataKey` in the payload's
+   * `layoutData`).
+   */
+  dataKey?: string
   component: RouteComponent
   hasHandler?: boolean
+  /**
+   * Nearest-ancestor `loading.tsx`, resolved at generation time. Rendered as
+   * the `<Suspense>` fallback while this route's server data loads on client
+   * navigation. Falls back to a framework default when absent.
+   */
+  loadingComponent?: LoadingComponent
+  /**
+   * Nearest-ancestor `error.tsx`, resolved at generation time. Rendered by the
+   * route error boundary. Falls back to a framework default when absent.
+   */
+  errorComponent?: ErrorComponent
+  /**
+   * Nearest-ancestor `not-found.tsx`, resolved at generation time. On the root
+   * route it is the global not-found UI, rendered when no route matches. Falls
+   * back to a framework default when absent.
+   */
+  notFoundComponent?: NotFoundComponent
 }
 
 export function createRoute(options: RouteOptions): Route {
@@ -60,9 +89,13 @@ export class Route {
   init = (originalIndex: number): void => {
     this.originalIndex = originalIndex
 
-    const isRoot = !this.options.path && !this.options.id
-
     this.parentRoute = this.options.getParentRoute?.()
+
+    // Only the true root (no parent) claims the shared ROOT_ROUTE_ID. A nested
+    // or route-group `layout` is also pathless, but it has a parent — it must
+    // get its own id (from its filePath) so it doesn't overwrite the root in
+    // `routesById`.
+    const isRoot = !this.parentRoute && !this.options.path && !this.options.id
 
     if (isRoot) {
       this.path = ROOT_ROUTE_ID
@@ -75,7 +108,7 @@ export class Route {
       path = trimPathLeft(path)
     }
 
-    const customId = this.options.id || path
+    const customId = this.options.id || path || this.options.filePath
 
     // Strip the parentId prefix from the first level of children
     let id = isRoot ? ROOT_ROUTE_ID : joinPaths([customId])
@@ -99,7 +132,7 @@ export class Route {
     return this
   }
 
-  update = (options: RouteOptions): this => {
+  update = (options: Partial<RouteOptions>): this => {
     Object.assign(this.options, options)
     this.isRoot = options.isRoot || !options.getParentRoute
     return this

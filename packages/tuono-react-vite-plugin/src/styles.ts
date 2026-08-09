@@ -68,26 +68,37 @@ export const getStylesForModule = async (
     let node: ModuleNode | undefined =
       await viteDevServer.moduleGraph.getModuleByUrl(moduleFilePath)
 
-    // If the module is only present in the client module graph, the module
-    // won't have been found on the first request to the server. If so, we
-    // request the module so it's in the module graph, then try again.
+    // If the module is only present in the client module graph, it won't have
+    // been found on the first request to the server. Prime it into the graph,
+    // then try again.
+    //
+    // Route ids are extension-less (e.g. `.../routes/page`), and while a normal
+    // `import` resolves that against the configured `resolve.extensions`,
+    // `transformRequest` does not — so a non-default extension like `.mdx` fails
+    // to load. Resolve the real id first (running the full resolver/plugins) so
+    // those routes work too.
     if (!node) {
-      try {
-        await viteDevServer.transformRequest(moduleFilePath)
-      } catch (err) {
-        console.error(err)
-      }
+      const resolved = await viteDevServer.pluginContainer
+        .resolveId(moduleFilePath)
+        .catch(() => null)
+      const idToLoad = resolved?.id ?? moduleFilePath
 
-      node = await viteDevServer.moduleGraph.getModuleByUrl(moduleFilePath)
+      await viteDevServer.transformRequest(idToLoad).catch(() => undefined)
+
+      node =
+        (await viteDevServer.moduleGraph.getModuleByUrl(idToLoad)) ??
+        (await viteDevServer.moduleGraph.getModuleByUrl(moduleFilePath))
     }
 
+    // Critical CSS is best-effort: if the route's module still can't be resolved
+    // (e.g. a loader vite can't reach here), skip it silently — the route still
+    // loads its styles the normal way, so this is not an error worth surfacing.
     if (!node) {
-      console.error(`Could not resolve module for file: ${moduleFilePath}`)
       return
     }
     await findNodeDependencies(viteDevServer, node, deps)
-  } catch (error) {
-    console.error(error)
+  } catch {
+    return
   }
 
   for (const dep of deps) {
@@ -115,7 +126,9 @@ export const getStylesForModule = async (
         styles[dep.url] = css
       } catch {
         // this can happen with dynamically imported modules
-        console.warn(`Could not load ${dep.file}`)
+        console.warn(
+          `[tuono] critical css: could not load ${dep.file} (resolved from ${dep.url})`,
+        )
       }
     }
   }
@@ -140,11 +153,11 @@ export const getStylesForModule = async (
  */
 function findFileFromComponentId(id: string): string {
   if (id.endsWith('/')) {
-    return id + 'index'
+    return id + 'page'
   }
 
   if (id.includes('__root__')) {
-    return id.replaceAll('__root__', '__layout')
+    return id.replaceAll('__root__', 'layout')
   }
 
   return id
@@ -180,6 +193,15 @@ const findNodeDependencies = async (
   node: ModuleNode,
   deps: Set<ModuleNode>,
 ): Promise<void> => {
+  // On a cold server start only modules the browser has already requested have
+  // been transformed. Anything deeper (e.g. a component imported by the route)
+  // sits in the graph as a bare placeholder with no import information, so the
+  // walk would dead-end before reaching its CSS. Prime it the same way the
+  // top-level route is primed. This also runs the plugin `transform` hook for
+  // CSS modules, populating `cssModulesManifest` before it is read below.
+  if (!node.ssrTransformResult && !node.transformResult) {
+    await vite.transformRequest(node.url).catch(() => undefined)
+  }
   // since `ssrTransformResult.deps` contains URLs instead of `ModuleNode`s, this process is asynchronous.
   // instead of using `await`, we resolve all branches in parallel.
   const branches: Array<Promise<void>> = []

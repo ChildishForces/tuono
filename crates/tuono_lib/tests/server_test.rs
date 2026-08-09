@@ -1,8 +1,15 @@
+// See tests/main.rs: the `#[handler]` macro references
+// `crate::tuono_main_state::ApplicationState`.
+mod tuono_main_state {
+    pub type ApplicationState = ();
+}
+
 mod utils;
 use std::collections::HashMap;
 
-use crate::utils::mock_server::MockTuonoServer;
 use serial_test::serial;
+
+use crate::utils::mock_server::MockTuonoServer;
 
 #[tokio::test]
 #[serial]
@@ -47,10 +54,11 @@ async fn not_found_route() {
 
     // TODO: This should return a 404 status code
     assert!(response.status().is_success());
-    assert_eq!(
-        response.text().await.unwrap(),
-        "<h1>404 Not found</h1><a href=\"/\">Return home</a>"
-    );
+    // An unmatched path falls through to the SSR bundle's buffered render
+    // (`renderFn`); assert we get a rendered document back.
+    let body = response.text().await.unwrap();
+    assert!(body.starts_with("<!DOCTYPE html>"));
+    assert!(body.contains("tuono ssr fixture"));
 }
 
 #[tokio::test]
@@ -73,13 +81,14 @@ async fn index_html_route() {
 
     // TODO: This should return a 404 status code
     assert!(response.status().is_success());
-    assert!(
-        response
-            .text()
-            .await
-            .unwrap()
-            .starts_with("<!DOCTYPE html>")
-    );
+    // The page route renders through the streaming SSR path (`finish_render` →
+    // `render_pool::render_stream`, which reassembles the bundle's chunks). The
+    // fixture emits the document in two chunks; assert the reassembled body is a
+    // complete document.
+    let body = response.text().await.unwrap();
+    assert!(body.starts_with("<!DOCTYPE html>"));
+    assert!(body.contains("tuono ssr fixture"));
+    assert!(body.trim_end().ends_with("</html>"));
 }
 
 #[tokio::test]

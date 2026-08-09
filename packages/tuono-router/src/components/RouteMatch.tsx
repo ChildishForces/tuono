@@ -1,74 +1,91 @@
 import type { JSX } from 'react'
 import { memo, Suspense, useMemo } from 'react'
 
+import { DefaultLoading, DefaultError, DevErrorReporter } from 'tuono-ui'
+
 import type { Mode } from '../types'
 import type { Route } from '../route'
-
-import { useServerPayloadData } from '../hooks/useServerPayloadData'
+import { buildResourceKey, readLayoutData } from '../data/resourceCache'
 
 import { useRouterContext } from './RouterContext'
 import { CriticalCss } from './CriticalCss'
+import { RouteDataLoader } from './RouteDataLoader'
+import { TuonoErrorBoundary } from './TuonoErrorBoundary'
 
-interface RouteMatchProps<TServerPayloadData = unknown> {
+interface RouteMatchProps {
   route: Route
-  // User defined server side props
-  serverInitialData: TServerPayloadData
   mode?: Mode
 }
 
 /**
- * Returns the route match with the root element if exists
- *
- * It handles the fetch of the client side resources
+ * Renders the matched route: its parent layouts wrap an error boundary +
+ * `<Suspense>` boundary around the data-reading leaf. The boundary is keyed by
+ * the data-resource key so a navigation (including same-route param changes)
+ * remounts it and shows the loading fallback, while the layouts persist.
  */
-export const RouteMatch = ({
-  route,
-  serverInitialData,
-  mode,
-}: RouteMatchProps): JSX.Element => {
-  const { data } = useServerPayloadData(route, serverInitialData)
-  const { isTransitioning } = useRouterContext()
+export const RouteMatch = ({ route, mode }: RouteMatchProps): JSX.Element => {
+  const { location, navigationId, retry } = useRouterContext()
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const routes = useMemo(() => loadParentComponents(route), [route.id])
 
-  const routeData = isTransitioning ? null : data
+  const resourceKey = buildResourceKey(navigationId, location)
+
+  const LoadingComponent = route.options.loadingComponent ?? DefaultLoading
+  // In dev the boundary reports the error to the shared store (rendered by the
+  // floating DevErrorOverlayHost); production falls back to a detail-free page
+  // so source/stack are never leaked to end users.
+  const ErrorComponent =
+    route.options.errorComponent ??
+    (mode === 'Dev' ? DevErrorReporter : DefaultError)
 
   return (
-    <TraverseRootComponents
-      routes={routes}
-      data={routeData}
-      isLoading={isTransitioning}
-      mode={mode}
-    >
-      <Suspense>
-        <CriticalCss routeFilePath={route.filePath} mode={mode} />
-        <route.component data={routeData} isLoading={isTransitioning} />
+    <TraverseRootComponents routes={routes} mode={mode}>
+      {/* The leaf route's critical CSS must stay OUTSIDE the <Suspense> below:
+          React 19 ties a boundary's reveal to any `precedence` stylesheet
+          rendered inside it, which would push the streamed initial content into
+          an out-of-order late chunk (empty shell paints first — a flash on
+          every cold load). Rendered here it still hoists into the shell's
+          <head> as render-blocking, but the boundary streams inline. */}
+      <CriticalCss routeFilePath={route.filePath} mode={mode} />
+      {/* The <Suspense> is not keyed by the resource key, so navigation
+          re-renders (rather than remounts) the subtree. With the destination's
+          data + code prefetched by `updateLocation`, that lets the new page
+          appear in place with no fallback flash. The error boundary resets via
+          `resetKey` instead of a key change. */}
+      <Suspense fallback={<LoadingComponent />}>
+        <TuonoErrorBoundary
+          resetKey={resourceKey}
+          fallback={ErrorComponent}
+          onReset={retry}
+        >
+          <RouteDataLoader
+            route={route}
+            resourceKey={resourceKey}
+            location={location}
+          />
+        </TuonoErrorBoundary>
       </Suspense>
     </TraverseRootComponents>
   )
 }
 
-interface TraverseRootComponentsProps<TData = unknown> {
+interface TraverseRootComponentsProps {
   routes: Array<Route>
-  data: TData
-  isLoading: boolean
   children?: React.ReactNode
   index?: number
   mode?: Mode
 }
 
 /**
- * This component traverses and renders all components
- * that wrap the selected route (__layout).
- * Parent components must be memoized
- * to prevent re-rendering issues when the route changes.
+ * Renders the layout (`layout`) components that wrap the selected route.
+ * Layouts receive only `children` now — they live OUTSIDE the keyed Suspense
+ * boundary, so they persist across navigation while only the page area shows
+ * the loading fallback. Memoized so navigation does not re-render layouts.
  */
 const TraverseRootComponents = memo(
   ({
     routes,
-    data,
-    isLoading,
     index = 0,
     mode,
     children,
@@ -81,16 +98,18 @@ const TraverseRootComponents = memo(
       // as is the case for the root route
       const routeFilePath = route.filePath || route.id
 
+      // A `layout.rs` handler's data is seeded (by SSR or the page's data fetch)
+      // and read synchronously here, then spread as the layout's props alongside
+      // `children`. Layouts without a data handler receive only `children`.
+      const layoutProps =
+        route.options.hasHandler && route.options.dataKey
+          ? readLayoutData(route.options.dataKey)
+          : undefined
+
       return (
-        <Parent data={data} isLoading={isLoading}>
+        <Parent {...layoutProps}>
           <CriticalCss routeFilePath={routeFilePath} mode={mode} />
-          <TraverseRootComponents
-            routes={routes}
-            data={data}
-            isLoading={isLoading}
-            index={index + 1}
-            mode={mode}
-          >
+          <TraverseRootComponents routes={routes} index={index + 1} mode={mode}>
             {children}
           </TraverseRootComponents>
         </Parent>

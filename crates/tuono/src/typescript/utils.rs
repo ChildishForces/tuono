@@ -1,22 +1,25 @@
-use crate::symbols::TYPE_TRAIT;
 use syn::{Attribute, Meta};
+
+use crate::symbols::TYPE_TRAIT;
 
 pub fn has_derive_type(attrs: &[Attribute]) -> bool {
     for attr in attrs {
         if let Meta::List(meta_list) = &attr.meta
-            && meta_list.path.is_ident("derive") {
-                for nested_meta in meta_list
-                    .parse_args_with(
-                        syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
-                    )
-                    .unwrap_or_default()
+            && meta_list.path.is_ident("derive")
+        {
+            for nested_meta in meta_list
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+                )
+                .unwrap_or_default()
+            {
+                if let Meta::Path(path) = nested_meta
+                    && path.is_ident(&TYPE_TRAIT)
                 {
-                    if let Meta::Path(path) = nested_meta
-                        && path.is_ident(&TYPE_TRAIT) {
-                            return true;
-                        }
+                    return true;
                 }
             }
+        }
     }
     false
 }
@@ -24,8 +27,9 @@ pub fn has_derive_type(attrs: &[Attribute]) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use super::*;
     use syn::{ItemEnum, ItemStruct, ItemType, parse_quote};
+
+    use super::*;
 
     #[test]
     fn it_correctly_checks_if_derive_type_is_present() {

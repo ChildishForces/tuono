@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
 
+import type { ServerErrorPayload } from 'tuono-router'
+
 import type { TuonoConfigServer } from './config'
 
 export type Mode = 'Dev' | 'Prod'
@@ -21,6 +23,12 @@ export type ServerPayload<TData = unknown> = {
   location: ServerPayloadLocation
 
   data: TData
+
+  /** Wrapping `layout.rs` handlers' data, keyed by each layout's `dataKey`. */
+  layoutData?: Record<string, unknown>
+
+  /** Present (dev only) when the route's Rust handler panicked. */
+  serverError?: ServerErrorPayload
 } & (
   | {
       mode: 'Prod'
@@ -32,16 +40,6 @@ export type ServerPayload<TData = unknown> = {
       devServerConfig?: TuonoConfigServer
     }
 )
-
-export type TuonoRouteProps<TData> =
-  | {
-      data: null
-      isLoading: true
-    }
-  | {
-      data: TData
-      isLoading: false
-    }
 
 export interface TuonoLayoutProps {
   children: ReactNode

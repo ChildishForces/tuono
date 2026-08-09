@@ -26,6 +26,14 @@ describe('normalizeConfig', () => {
         optimizeDeps: undefined,
         plugins: [],
       },
+      logging: {
+        format: 'pretty',
+        routeTree: false,
+        browser: { enabled: true, level: 'info' },
+      },
+      dev: { criticalCss: true },
+      ssr: { renderThreads: null },
+      output: 'server',
     })
   })
 
@@ -43,6 +51,14 @@ describe('normalizeConfig', () => {
         optimizeDeps: undefined,
         plugins: [],
       },
+      logging: {
+        format: 'pretty',
+        routeTree: false,
+        browser: { enabled: true, level: 'info' },
+      },
+      dev: { criticalCss: true },
+      ssr: { renderThreads: null },
+      output: 'server',
     })
   })
 
@@ -160,6 +176,62 @@ describe('normalizeConfig', () => {
             ],
           }) as unknown,
         }),
+      )
+    })
+  })
+
+  describe('dev', () => {
+    it('should default criticalCss to true', () => {
+      expect(normalizeConfig({})).toStrictEqual(
+        expect.objectContaining({
+          dev: { criticalCss: true },
+        }),
+      )
+    })
+
+    it('should honour criticalCss set to false', () => {
+      const config: TuonoConfig = { dev: { criticalCss: false } }
+
+      expect(normalizeConfig(config)).toStrictEqual(
+        expect.objectContaining({
+          dev: { criticalCss: false },
+        }),
+      )
+    })
+  })
+
+  describe('ssr', () => {
+    it('should default renderThreads to null (auto)', () => {
+      expect(normalizeConfig({})).toStrictEqual(
+        expect.objectContaining({
+          ssr: { renderThreads: null },
+        }),
+      )
+    })
+
+    it('should honour renderThreads set by the user', () => {
+      const config: TuonoConfig = { ssr: { renderThreads: 4 } }
+
+      expect(normalizeConfig(config)).toStrictEqual(
+        expect.objectContaining({
+          ssr: { renderThreads: 4 },
+        }),
+      )
+    })
+  })
+
+  describe('output', () => {
+    it('should default output to server', () => {
+      expect(normalizeConfig({})).toStrictEqual(
+        expect.objectContaining({ output: 'server' }),
+      )
+    })
+
+    it('should honour output set to static', () => {
+      const config: TuonoConfig = { output: 'static' }
+
+      expect(normalizeConfig(config)).toStrictEqual(
+        expect.objectContaining({ output: 'static' }),
       )
     })
   })
